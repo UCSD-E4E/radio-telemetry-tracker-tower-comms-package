@@ -10,7 +10,8 @@ packages = [
     {include = "radio_telemetry_tracker_tower_comms_package" },
 ]
 dependencies = [
-    "meshtastic (>=2.5.10,<3.0.0)"
+    "meshtastic (>=2.5.10,<3.0.0)",
+    "grpcio-tools (>=1.69.0,<2.0.0)"
 ]
 
 

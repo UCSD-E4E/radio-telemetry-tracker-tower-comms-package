@@ -5,16 +5,35 @@ import logging
 import queue
 import threading
 import time
-from typing import TYPE_CHECKING, ClassVar
+from collections.abc import Callable
+from typing import ClassVar, TypedDict
 
 import meshtastic
 from meshtastic.serial_interface import SerialInterface as UnderlyingMesh
 
-if TYPE_CHECKING:
-    from collections.abc import Callable
-
-
 logger = logging.getLogger(__name__)
+
+
+class PacketData(TypedDict, total=False):
+    """Type definition for packet data structure."""
+
+    id: int
+    decoded: dict
+    result: str
+    payload: bytes
+
+
+class MeshNetworkError(Exception):
+    """Base exception for mesh network related errors."""
+
+
+class MeshConnectionError(MeshNetworkError):
+    """Raised when connection to mesh device fails."""
+
+
+class SendError(MeshNetworkError):
+    """Raised when sending a message fails."""
+
 
 
 class MeshInterface(abc.ABC):
@@ -22,14 +41,49 @@ class MeshInterface(abc.ABC):
 
     This interface provides a common API for different mesh networking implementations,
     supporting both real hardware (Meshtastic) and simulated networks.
+
+    Attributes:
+        MESH_PORT_NUM: Port number used for mesh communication
+        _on_ack_success: Callback function called when message acknowledgment succeeds
+        _on_ack_fail: Callback function called when message acknowledgment fails
     """
 
     MESH_PORT_NUM = 42
 
     def __init__(self) -> None:
-        """Initialize the mesh interface."""
-        self._ack_callback: Callable[[int, bool], None] | None = None
-        self._ack_results: dict[int, bool | None] = {}
+        """Initialize the mesh interface with default callback handlers."""
+        self._on_ack_success: Callable[[int], None] | None = None
+        self._on_ack_fail: Callable[[int], None] | None = None
+
+    @property
+    def on_ack_success(self) -> Callable[[int], None] | None:
+        """Get the success acknowledgment callback."""
+        return self._on_ack_success
+
+    @on_ack_success.setter
+    def on_ack_success(self, callback: Callable[[int], None] | None) -> None:
+        """Set the success acknowledgment callback.
+
+        Args:
+            callback: Function to call when message acknowledgment succeeds.
+                     Takes packet ID as parameter.
+        """
+        self._on_ack_success = callback
+
+    @property
+    def on_ack_fail(self) -> Callable[[int], None] | None:
+        """Get the failure acknowledgment callback."""
+        return self._on_ack_fail
+
+    @on_ack_fail.setter
+    def on_ack_fail(self, callback: Callable[[int], None] | None) -> None:
+        """Set the failure acknowledgment callback.
+
+        Args:
+            callback: Function to call when message acknowledgment fails.
+                     Takes packet ID as parameter.
+        """
+        self._on_ack_fail = callback
 
     @abc.abstractmethod
     def connect(self) -> None:
@@ -83,18 +137,25 @@ class MeshtasticMeshInterface(MeshInterface):
         self.serial_device = serial_device
         self._interface: UnderlyingMesh | None = None
         self._rx_queue = queue.Queue()
-
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
 
     def connect(self) -> None:
-        """Connect to the Meshtastic device using serial interface."""
+        """Connect to the Meshtastic device using serial interface.
+
+        Raises:
+            MeshConnectionError: If connection to device fails
+        """
         logger.info("Connecting to Meshtastic device...")
-        self._interface = meshtastic.serial_interface.SerialInterface(
-            devPath=self.serial_device,
-        )
-        self._interface.onReceive = self._on_receive
-        logger.info("Connected on %s", self.serial_device or "AUTO")
+        try:
+            self._interface = meshtastic.serial_interface.SerialInterface(
+                devPath=self.serial_device,
+            )
+            self._interface.onReceive = self._on_receive
+            logger.info("Connected on %s", self.serial_device or "AUTO")
+        except Exception as e:
+            msg = f"Failed to connect: {e}"
+            raise MeshConnectionError(msg) from e
 
     def close(self) -> None:
         """Close the connection to the Meshtastic device."""
@@ -144,14 +205,17 @@ class MeshtasticMeshInterface(MeshInterface):
 
         Returns:
             Packet ID if sent, None on failure
+
+        Raises:
+            SendError: If sending the message fails
         """
         if not self._interface:
-            logger.warning("No Meshtastic interface; cannot send.")
-            return None
+            msg = "No Meshtastic interface; cannot send."
+            raise SendError(msg)
 
         dest_id = "^all" if destination is None else str(destination)
 
-        def on_resp_cb(resp_packet: dict) -> None:
+        def on_resp_cb(resp_packet: PacketData) -> None:
             self._on_ack_response(resp_packet)
 
         try:
@@ -165,14 +229,11 @@ class MeshtasticMeshInterface(MeshInterface):
                 onResponseAckPermitted=True,
             )
             if result_packet:
-                pkt_id = result_packet.id
-                with self._lock:
-                    self._ack_results[pkt_id] = None
-                return pkt_id
+                return result_packet.id
             logger.warning("No packet returned by sendData")
-        except Exception:
-            logger.exception("Failed to send data.")
-            return None
+        except Exception as e:
+            msg = f"Failed to send data: {e}"
+            raise SendError(msg) from e
         else:
             return None
 
@@ -190,8 +251,13 @@ class MeshtasticMeshInterface(MeshInterface):
         except queue.Empty:
             return None
 
-    def _on_receive(self, packet: dict, _: UnderlyingMesh) -> None:
-        """Handle received messages from the Meshtastic device."""
+    def _on_receive(self, packet: PacketData, _: UnderlyingMesh) -> None:
+        """Handle received messages from the Meshtastic device.
+
+        Args:
+            packet: Received packet data
+            _: Unused interface parameter
+        """
         try:
             decoded = packet.get("decoded", {})
             portnum = decoded.get("portnum")
@@ -199,14 +265,15 @@ class MeshtasticMeshInterface(MeshInterface):
                 payload = decoded.get("payload")
                 if payload:
                     self._rx_queue.put(payload)
+                    logger.debug("Received message: %r", payload)
         except Exception:
-            logger.exception("Error in _on_receive")
+            logger.exception("Error processing received message")
 
-    def _on_ack_response(self, resp_packet: dict) -> None:
+    def _on_ack_response(self, resp_packet: PacketData) -> None:
         """Called when an ack or nak is received, or the transaction ends.
 
-        We'll see something like resp_packet with an 'id' field and
-        possibly 'result': 'ACK' or 'NAK'.
+        Args:
+            resp_packet: Response packet containing acknowledgment info
         """
         try:
             pkt_id = resp_packet.get("id")
@@ -214,28 +281,19 @@ class MeshtasticMeshInterface(MeshInterface):
                 return
 
             result_str = resp_packet.get("result")
-            ack_status: bool | None = None
-            if result_str == "ACK":
-                ack_status = True
-            elif result_str == "NAK":
-                ack_status = False
+            if result_str == "ACK" and self._on_ack_success:
+                self._on_ack_success(pkt_id)
+            elif result_str == "NAK" and self._on_ack_fail:
+                self._on_ack_fail(pkt_id)
 
-            if ack_status is not None:
-                with self._lock:
-                    if pkt_id in self._ack_results:
-                        self._ack_results[pkt_id] = ack_status
-
-                logger.debug(
-                    "AckResponse for packet_id=%d => %s",
-                    pkt_id,
-                    "ACK" if ack_status else "NAK",
-                )
-
-                if self._ack_callback:
-                    self._ack_callback(pkt_id, ack_status)
+            logger.debug(
+                "AckResponse for packet_id=%d => %s",
+                pkt_id,
+                result_str or "UNKNOWN",
+            )
 
         except Exception:
-            logger.exception("Error in _on_ack_response")
+            logger.exception("Error processing ack response")
 
 
 class SimulatedMeshInterface(MeshInterface):
@@ -313,7 +371,7 @@ class SimulatedMeshInterface(MeshInterface):
         Returns:
             Packet ID if sent, None on failure
         """
-        self.send_message_with_id(data, destination, want_ack=want_ack)
+        return self.send_message_with_id(data, destination, want_ack=want_ack)
 
     def send_message_with_id(
         self,
@@ -322,7 +380,16 @@ class SimulatedMeshInterface(MeshInterface):
         *,
         want_ack: bool = False,
     ) -> int | None:
-        """Implementation of send_message that returns packet ID."""
+        """Implementation of send_message that returns packet ID.
+
+        Args:
+            data: Bytes to send
+            destination: Target node ID, or None for broadcast
+            want_ack: Whether to request acknowledgment
+
+        Returns:
+            Packet ID if sent, None on failure
+        """
         node_data = self._nodes_data.get(self.numeric_id)
         if not node_data:
             logger.warning("Node %d not found; can't send.", self.numeric_id)
@@ -363,19 +430,22 @@ class SimulatedMeshInterface(MeshInterface):
                     "Destination %d doesn't exist; failing ack...",
                     destination,
                 )
-                if want_ack and self._ack_callback:
+                if want_ack and self._on_ack_fail:
                     # Immediately call user ack callback with fail
-                    self._ack_callback(pkt_id, False)  # noqa: FBT003
+                    self._on_ack_fail(pkt_id)
                 return pkt_id
 
         # If want_ack => simulate success/fail
         if want_ack:
             import secrets
+
             # Simulate success/fail based on configured probability
             success = secrets.randbelow(100) < self._ACK_SUCCESS_PERCENT
             logger.debug("Sim ack for pkt_id=%d => %s", pkt_id, success)
-            if self._ack_callback:
-                self._ack_callback(pkt_id, success)
+            if success and self._on_ack_success:
+                self._on_ack_success(pkt_id)
+            elif not success and self._on_ack_fail:
+                self._on_ack_fail(pkt_id)
 
         return pkt_id
 
