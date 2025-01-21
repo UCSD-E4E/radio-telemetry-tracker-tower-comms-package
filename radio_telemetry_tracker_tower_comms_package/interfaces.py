@@ -102,6 +102,18 @@ class MeshInterface(abc.ABC):
         """Get the user-friendly ID of this node."""
 
     @abc.abstractmethod
+    def get_node_user_id(self, node_id: int) -> str | None:
+        """Get the user-friendly ID of a specific node.
+
+        Args:
+            node_id: The numeric ID of the node to get the user ID for.
+
+        Returns:
+            The user-friendly ID of the node if it exists in the mesh network,
+            None if the node is not found or not connected.
+        """
+
+    @abc.abstractmethod
     def get_neighbors(self) -> list[int]:
         """Get list of neighboring node IDs."""
 
@@ -181,6 +193,34 @@ class MeshtasticMeshInterface(MeshInterface):
             return "UNKNOWN"
         my_user = self._interface.getMyUser()
         return my_user["id"] if my_user and "id" in my_user else "UNKNOWN"
+
+    def get_node_user_id(self, node_id: int) -> str | None:
+        """Get the user-friendly ID of a specific node.
+
+        Args:
+            node_id: The numeric ID of the node to get the user ID for.
+
+        Returns:
+            The user-friendly ID of the node if it exists in the mesh network,
+            None if the node is not found or not connected.
+        """
+        if not self._interface:
+            return None
+
+        # Check if it's our own ID
+        my_num = self.get_numeric_node_id()
+        if my_num == node_id:
+            return self.get_user_id()
+
+        # Check if node exists in mesh network
+        try:
+            node_info = self._interface.nodes.get(node_id)
+            if node_info and "user" in node_info:
+                return node_info["user"].get("id")
+        except Exception:
+            logger.exception("Error getting user ID for node %d", node_id)
+
+        return None
 
     def get_neighbors(self) -> list[int]:
         """Get list of neighboring node IDs from Meshtastic device."""
@@ -346,6 +386,24 @@ class SimulatedMeshInterface(MeshInterface):
     def get_user_id(self) -> str:
         """Get this node's user ID."""
         return self.user_id
+
+    def get_node_user_id(self, node_id: int) -> str | None:
+        """Get the user-friendly ID of a specific node.
+
+        Args:
+            node_id: The numeric ID of the node to get the user ID for.
+
+        Returns:
+            The user-friendly ID of the node if it exists in the mesh network,
+            None if the node is not found or not connected.
+        """
+        # Check if it's our own ID
+        if node_id == self.numeric_id:
+            return self.user_id
+
+        # Check if node exists in simulated network
+        node_data = self._nodes_data.get(node_id)
+        return node_data["user_id"] if node_data else None
 
     def get_neighbors(self) -> list[int]:
         """Get list of neighboring node IDs."""

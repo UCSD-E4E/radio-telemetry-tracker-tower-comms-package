@@ -44,3 +44,20 @@ message RequestConfigPacket {
 message RequestPingPacket {
     BasePacket base_packet = 1;
 }
+
+message ErrorPacket {
+    BasePacket base_packet = 1;
+    string error_message = 2;
+}
+
+message MeshPacket {
+    oneof msg {
+        ConfigPacket config = 1;
+        NoConfigPacket no_config = 2;
+        PingPacket ping = 3;
+        NoPingPacket no_ping = 4;
+        RequestConfigPacket request_config = 5;
+        RequestPingPacket request_ping = 6;
+        ErrorPacket error = 7;
+    }
+}
