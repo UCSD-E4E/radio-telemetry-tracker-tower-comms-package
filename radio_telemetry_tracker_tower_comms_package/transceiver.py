@@ -17,11 +17,7 @@ if TYPE_CHECKING:
 
     from radio_telemetry_tracker_tower_comms_package.interfaces import MeshInterface
 
-def _current_timestamp_us() -> int:
-    """Get the current timestamp in microseconds since the Unix epoch."""
-    return int(time.time() * 1_000_000)
-
-class PacketManager:
+class Transceiver:
     """Manages mesh network packet transmission and reception."""
 
     def __init__(
@@ -30,7 +26,7 @@ class PacketManager:
         on_ack_success: Callable[[int], None] | None = None,
         on_ack_fail: Callable[[int], None] | None = None,
     ) -> None:
-        """Initialize the PacketManager.
+        """Initialize the Transceiver.
 
         Args:
             mesh_interface: Interface for mesh network communication
@@ -55,7 +51,7 @@ class PacketManager:
         self._stop_event.clear()
         self._send_thread.start()
         self._recv_thread.start()
-        logger.info("PacketManager started with node ID: %s", self.mesh_interface.get_user_id())
+        logger.info("Transceiver started with node ID: %s", self.mesh_interface.get_user_id())
 
     def stop(self) -> None:
         """Stop send/receive threads and close the mesh interface."""
@@ -63,7 +59,7 @@ class PacketManager:
         self._send_thread.join(timeout=2)
         self._recv_thread.join(timeout=2)
         self.mesh_interface.close()
-        logger.info("PacketManager stopped")
+        logger.info("Transceiver stopped")
 
     def get_node_id(self) -> int | None:
         """Get this node's numeric ID."""
@@ -141,3 +137,6 @@ class PacketManager:
             packet: The received Packet protobuf message
         """
 
+    def current_timestamp_us() -> int:
+        """Get the current timestamp in microseconds since the Unix epoch."""
+        return int(time.time() * 1_000_000)
