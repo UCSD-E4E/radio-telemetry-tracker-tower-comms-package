@@ -45,12 +45,14 @@ class NoPingData:
 @dataclass
 class RequestConfigData:
     """Request for configuration data."""
+    node_id: int
     timestamp: int | None = None
 
 
 @dataclass
 class RequestPingData:
     """Request for ping data."""
+    node_id: int
     timestamp: int | None = None
 
 
