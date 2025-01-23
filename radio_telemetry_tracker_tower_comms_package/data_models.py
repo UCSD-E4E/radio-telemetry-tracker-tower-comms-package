@@ -4,8 +4,28 @@ from dataclasses import dataclass
 
 
 @dataclass
+class PositionData:
+    """Geographic position data for a node in the mesh network."""
+
+    node_id: int
+    latitude: float
+    longitude: float
+    altitude: float
+    timestamp: int | None = None
+
+
+@dataclass
+class RequestConfigData:
+    """Request for configuration data."""
+
+    node_id: int | None = None
+    timestamp: int | None = None
+
+
+@dataclass
 class ConfigData:
     """Configuration settings for radio telemetry operation."""
+
     gain: float
     sampling_rate: int
     center_frequency: int
@@ -16,49 +36,27 @@ class ConfigData:
     ping_max_len_mult: float
     ping_min_len_mult: float
     target_frequencies: list[int]
-    timestamp: int | None = None
-
-
-@dataclass
-class NoConfigData:
-    """Indicates no configuration data is available."""
+    node_id: int | None = None
     timestamp: int | None = None
 
 
 @dataclass
 class PingData:
     """Data from a detected radio ping."""
+
     frequency: int
     amplitude: float
     latitude: float
     longitude: float
     altitude: float
-    timestamp: int | None = None
-
-
-@dataclass
-class NoPingData:
-    """Indicates no ping data is available."""
-    timestamp: int | None = None
-
-
-@dataclass
-class RequestConfigData:
-    """Request for configuration data."""
-    node_id: int
-    timestamp: int | None = None
-
-
-@dataclass
-class RequestPingData:
-    """Request for ping data."""
-    node_id: int
+    node_id: int | None = None
     timestamp: int | None = None
 
 
 @dataclass
 class ErrorData:
     """Error information with message."""
-    error_message: str
-    timestamp: int | None = None
 
+    error_message: str
+    node_id: int | None = None
+    timestamp: int | None = None

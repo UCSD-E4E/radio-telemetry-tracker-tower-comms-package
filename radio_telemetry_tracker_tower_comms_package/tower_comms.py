@@ -1,50 +1,69 @@
-"""High-level TowerComms class for user-facing interaction with mesh network packet communication."""
+"""High-level interface for mesh network communication between radio telemetry towers.
 
-from __future__ import annotations
+Provides functionality for sending and receiving configuration, ping data, and error
+messages between towers in a mesh network.
+"""
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, TypeVar
+from typing import Literal, TypeVar
 
-from radio_telemetry_tracker_tower_comms_package.data_models import (
+from radio_telemetry_tracker_tower_comms_package.data_types import (
     ConfigData,
     ErrorData,
-    NoConfigData,
-    NoPingData,
     PingData,
+    PositionData,
     RequestConfigData,
-    RequestPingData,
 )
 from radio_telemetry_tracker_tower_comms_package.interfaces import (
+    MeshInterface,
     MeshtasticMeshInterface,
     SimulatedMeshInterface,
 )
-from radio_telemetry_tracker_tower_comms_package.proto import MeshPacket
-from radio_telemetry_tracker_tower_comms_package.transceiver import (
-    Transceiver,
-    current_timestamp_us,
+from radio_telemetry_tracker_tower_comms_package.proto import (
+    ConfigPacket as PbConfigPacket,
+)
+from radio_telemetry_tracker_tower_comms_package.proto import (
+    ErrorPacket as PbErrorPacket,
+)
+from radio_telemetry_tracker_tower_comms_package.proto import (
+    MeshPacket as PbMeshPacket,
+)
+from radio_telemetry_tracker_tower_comms_package.proto import (
+    PingPacket as PbPingPacket,
+)
+from radio_telemetry_tracker_tower_comms_package.proto import (
+    RequestConfigPacket as PbRequestConfigPacket,
 )
 
-if TYPE_CHECKING:
-    from collections.abc import Callable
+T = TypeVar("T", RequestConfigData, ConfigData, PingData, ErrorData)
 
-T = TypeVar("T")
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class NodeConfig:
-    """Configuration for mesh network node."""
+    """Configuration for a mesh network node.
+
+    Attributes:
+        interface_type: Type of mesh interface ("meshtastic" or "simulated")
+        device: Serial device path for Meshtastic interface
+        numeric_id: Numeric ID for simulated nodes
+        user_id: User-friendly ID for the node
+    """
 
     interface_type: Literal["meshtastic", "simulated"]
     device: str | None = None
+    numeric_id: int | None = None
+    user_id: str | None = None
 
 
-class TowerComms(Transceiver):
-    """High-level class for managing mesh network communication between radio telemetry towers.
+class TowerComms:
+    """High-level class for managing mesh network communication between towers.
 
-    Handles sending and receiving configuration, ping data, and other messages between towers
-    using either Meshtastic devices or a simulated mesh network.
+    Handles sending and receiving configuration, ping data, and error messages
+    between towers, with support for message acknowledgments and callbacks.
     """
 
     def __init__(
@@ -59,60 +78,90 @@ class TowerComms(Transceiver):
             config: Configuration for the mesh network node
             on_ack_success: Callback when message acknowledgment succeeds
             on_ack_failure: Callback when message acknowledgment fails
-
-        Raises:
-            ValueError: If interface_type is invalid
         """
-        if config.interface_type == "serial":
-            self.interface = MeshtasticMeshInterface(config.device)
-        elif config.interface_type == "simulated":
-            self.interface = SimulatedMeshInterface()
-        else:
-            msg = f"Invalid interface type: {config.interface_type}"
-            raise ValueError(msg)
+        self.config = config
+        self._on_ack_success = on_ack_success
+        self._on_ack_failure = on_ack_failure
 
-        super().__init__(self.interface, on_ack_success, on_ack_failure)
+        # Create the mesh interface
+        self.mesh_interface = self._create_mesh_interface(config)
+        if self._on_ack_success:
+            self.mesh_interface.on_ack_success = self._on_ack_success
+        if self._on_ack_failure:
+            self.mesh_interface.on_ack_failure = self._on_ack_failure
 
-        self._packet_handlers = {
-            "config": (self._extract_config, self._handle_config),
-            "no_config": (self._extract_no_config, self._handle_no_config),
-            "ping": (self._extract_ping, self._handle_ping),
-            "no_ping": (self._extract_no_ping, self._handle_no_ping),
-            "request_config": (
-                self._extract_request_config,
-                self._handle_request_config,
-            ),
-            "request_ping": (self._extract_request_ping, self._handle_request_ping),
-            "error": (self._extract_error, self._handle_error),
-        }
+        # Register a callback for inbound raw bytes
+        self.mesh_interface.register_packet_callback(self._on_raw_packet)
 
-        self._config_handlers: list[tuple[Callable[[ConfigData], None], bool]] = []
-        self._no_config_handlers: list[tuple[Callable[[NoConfigData], None], bool]] = []
-        self._ping_handlers: list[tuple[Callable[[PingData], None], bool]] = []
-        self._no_ping_handlers: list[tuple[Callable[[NoPingData], None], bool]] = []
+        # Handler lists
         self._request_config_handlers: list[
             tuple[Callable[[RequestConfigData], None], bool]
         ] = []
-        self._request_ping_handlers: list[
-            tuple[Callable[[RequestPingData], None], bool]
-        ] = []
+        self._config_handlers: list[tuple[Callable[[ConfigData], None], bool]] = []
+        self._ping_handlers: list[tuple[Callable[[PingData], None], bool]] = []
         self._error_handlers: list[tuple[Callable[[ErrorData], None], bool]] = []
 
-    def on_packet_received(self, packet: MeshPacket) -> None:
-        """Handle received packets by delegating to appropriate type-specific handlers.
+        # --------------------------------------------------------------------------
+
+    # Creating the underlying mesh interface
+    # --------------------------------------------------------------------------
+    def _create_mesh_interface(self, cfg: NodeConfig) -> MeshInterface:
+        if cfg.interface_type == "meshtastic":
+            return MeshtasticMeshInterface(serial_device=cfg.device)
+        if cfg.interface_type == "simulated":
+            if cfg.numeric_id is None:
+                msg = "Simulated requires a numeric_id."
+                raise ValueError(msg)
+            return SimulatedMeshInterface(
+                numeric_id=cfg.numeric_id,
+                user_id=cfg.user_id,
+            )
+        msg = f"Unknown interface_type: {cfg.interface_type}"
+        raise ValueError(msg)
+
+    # --------------------------------------------------------------------------
+    # Lifecycle: start/stop  # noqa: ERA001
+    # --------------------------------------------------------------------------
+
+    def start(self) -> None:
+        """Start the mesh network interface and enable communication."""
+        self.mesh_interface.connect()
+
+    def stop(self) -> None:
+        """Stop the mesh network interface and clean up resources."""
+        self.mesh_interface.close()
+
+    # --------------------------------------------------------------------------
+    # Public methods: Register/Unregister handlers
+    # --------------------------------------------------------------------------
+
+    def register_request_config_handler(
+        self,
+        handler: Callable[[RequestConfigData], None],
+        *,
+        one_time: bool = False,
+    ) -> None:
+        """Register a handler for configuration request messages.
 
         Args:
-            packet: The received mesh packet to process
+            handler: Function to call when request config message is received
+            one_time: If True, handler is removed after first invocation
         """
-        field = packet.WhichOneof("msg")
-        handler_entry = self._packet_handlers.get(field)
-        if not handler_entry:
-            logger.debug("Received an unhandled packet type: %s", field)
-            return
+        self._request_config_handlers.append((handler, one_time))
 
-        extractor, handler = handler_entry
-        data_object = extractor(getattr(packet, field))
-        handler(data_object)
+    def unregister_request_config_handler(
+        self,
+        handler: Callable[[RequestConfigData], None],
+    ) -> bool:
+        """Unregister a previously registered request config handler.
+
+        Args:
+            handler: The handler function to remove
+
+        Returns:
+            True if handler was found and removed, False otherwise
+        """
+        return self._unregister_handler(self._request_config_handlers, handler)
 
     def register_config_handler(
         self,
@@ -120,10 +169,10 @@ class TowerComms(Transceiver):
         *,
         one_time: bool = False,
     ) -> None:
-        """Register a handler for configuration data packets.
+        """Register a handler for configuration messages.
 
         Args:
-            handler: Function to call when config data is received
+            handler: Function to call when config message is received
             one_time: If True, handler is removed after first invocation
         """
         self._config_handlers.append((handler, one_time))
@@ -137,43 +186,7 @@ class TowerComms(Transceiver):
         Returns:
             True if handler was found and removed, False otherwise
         """
-        for cb, once in self._config_handlers:
-            if cb == handler:
-                self._config_handlers.remove((cb, once))
-                return True
-        return False
-
-    def register_no_config_handler(
-        self,
-        handler: Callable[[NoConfigData], None],
-        *,
-        one_time: bool = False,
-    ) -> None:
-        """Register a handler for no-config response packets.
-
-        Args:
-            handler: Function to call when no-config response is received
-            one_time: If True, handler is removed after first invocation
-        """
-        self._no_config_handlers.append((handler, one_time))
-
-    def unregister_no_config_handler(
-        self,
-        handler: Callable[[NoConfigData], None],
-    ) -> bool:
-        """Unregister a previously registered no-config handler.
-
-        Args:
-            handler: The handler function to remove
-
-        Returns:
-            True if handler was found and removed, False otherwise
-        """
-        for cb, once in self._no_config_handlers:
-            if cb == handler:
-                self._no_config_handlers.remove((cb, once))
-                return True
-        return False
+        return self._unregister_handler(self._config_handlers, handler)
 
     def register_ping_handler(
         self,
@@ -181,10 +194,10 @@ class TowerComms(Transceiver):
         *,
         one_time: bool = False,
     ) -> None:
-        """Register a handler for ping data packets.
+        """Register a handler for ping messages.
 
         Args:
-            handler: Function to call when ping data is received
+            handler: Function to call when ping message is received
             one_time: If True, handler is removed after first invocation
         """
         self._ping_handlers.append((handler, one_time))
@@ -198,104 +211,7 @@ class TowerComms(Transceiver):
         Returns:
             True if handler was found and removed, False otherwise
         """
-        for cb, once in self._ping_handlers:
-            if cb == handler:
-                self._ping_handlers.remove((cb, once))
-                return True
-        return False
-
-    def register_no_ping_handler(
-        self,
-        handler: Callable[[NoPingData], None],
-        *,
-        one_time: bool = False,
-    ) -> None:
-        """Register a handler for no-ping response packets.
-
-        Args:
-            handler: Function to call when no-ping response is received
-            one_time: If True, handler is removed after first invocation
-        """
-        self._no_ping_handlers.append((handler, one_time))
-
-    def unregister_no_ping_handler(self, handler: Callable[[NoPingData], None]) -> bool:
-        """Unregister a previously registered no-ping handler.
-
-        Args:
-            handler: The handler function to remove
-
-        Returns:
-            True if handler was found and removed, False otherwise
-        """
-        for cb, once in self._no_ping_handlers:
-            if cb == handler:
-                self._no_ping_handlers.remove((cb, once))
-                return True
-        return False
-
-    def register_request_config_handler(
-        self,
-        handler: Callable[[RequestConfigData], None],
-        *,
-        one_time: bool = False,
-    ) -> None:
-        """Register a handler for config request packets.
-
-        Args:
-            handler: Function to call when config request is received
-            one_time: If True, handler is removed after first invocation
-        """
-        self._request_config_handlers.append((handler, one_time))
-
-    def unregister_request_config_handler(
-        self,
-        handler: Callable[[RequestConfigData], None],
-    ) -> bool:
-        """Unregister a previously registered request-config handler.
-
-        Args:
-            handler: The handler function to remove
-
-        Returns:
-            True if handler was found and removed, False otherwise
-        """
-        for cb, once in self._request_config_handlers:
-            if cb == handler:
-                self._request_config_handlers.remove((cb, once))
-                return True
-        return False
-
-    def register_request_ping_handler(
-        self,
-        handler: Callable[[RequestPingData], None],
-        *,
-        one_time: bool = False,
-    ) -> None:
-        """Register a handler for ping request packets.
-
-        Args:
-            handler: Function to call when ping request is received
-            one_time: If True, handler is removed after first invocation
-        """
-        self._request_ping_handlers.append((handler, one_time))
-
-    def unregister_request_ping_handler(
-        self,
-        handler: Callable[[RequestPingData], None],
-    ) -> bool:
-        """Unregister a previously registered request-ping handler.
-
-        Args:
-            handler: The handler function to remove
-
-        Returns:
-            True if handler was found and removed, False otherwise
-        """
-        for cb, once in self._request_ping_handlers:
-            if cb == handler:
-                self._request_ping_handlers.remove((cb, once))
-                return True
-        return False
+        return self._unregister_handler(self._ping_handlers, handler)
 
     def register_error_handler(
         self,
@@ -303,10 +219,10 @@ class TowerComms(Transceiver):
         *,
         one_time: bool = False,
     ) -> None:
-        """Register a handler for error packets.
+        """Register a handler for error messages.
 
         Args:
-            handler: Function to call when error packet is received
+            handler: Function to call when error message is received
             one_time: If True, handler is removed after first invocation
         """
         self._error_handlers.append((handler, one_time))
@@ -320,339 +236,251 @@ class TowerComms(Transceiver):
         Returns:
             True if handler was found and removed, False otherwise
         """
-        for cb, once in self._error_handlers:
-            if cb == handler:
-                self._error_handlers.remove((cb, once))
-                return True
-        return False
+        return self._unregister_handler(self._error_handlers, handler)
 
-    def _validate_destination(self, destination: int | None) -> bool:
-        """Validate if a destination ID is valid for sending messages.
-
-        Args:
-            destination: The destination node ID to validate, or None for broadcast
-
-        Returns:
-            True if the destination is valid (None or exists in neighbors)
-
-        Raises:
-            ValueError: If the destination is invalid
-        """
-        if destination is None:
-            return True
-
-        neighbors = self.get_neighbors()
-        if destination not in neighbors:
-            msg = f"Invalid destination {destination}. Node must be in neighbors: {neighbors}"
-            raise ValueError(msg)
-
-        return True
-
-    def send_config(self, data: ConfigData, destination: int | None = None) -> None:
-        """Send configuration data to a specific node or broadcast.
-
-        Args:
-            data: Configuration data to send
-            destination: Optional destination node ID. If None, broadcast to all neighbors.
-
-        Raises:
-            ValueError: If the destination is invalid
-        """
-        self._validate_destination(destination)
-        packet = MeshPacket()
-        packet.config.base_packet.timestamp = current_timestamp_us()
-        packet.config.gain = data.gain
-        packet.config.sampling_rate = data.sampling_rate
-        packet.config.center_frequency = data.center_frequency
-        packet.config.run_num = data.run_num
-        packet.config.enable_test_data = data.enable_test_data
-        packet.config.ping_width_ms = data.ping_width_ms
-        packet.config.ping_min_snr = data.ping_min_snr
-        packet.config.ping_max_len_mult = data.ping_max_len_mult
-        packet.config.ping_min_len_mult = data.ping_min_len_mult
-        packet.config.target_frequencies.extend(data.target_frequencies)
-        self.enqueue_packet(packet, destination)
-
-    def send_no_config(
-        self,
-        destination: int | None = None,
-    ) -> None:
-        """Send no-config response to a specific node or broadcast.
-
-        Args:
-            destination: Optional destination node ID. If None, broadcast to all neighbors.
-
-        Raises:
-            ValueError: If the destination is invalid
-        """
-        self._validate_destination(destination)
-        packet = MeshPacket()
-        packet.no_config.base_packet.timestamp = current_timestamp_us()
-        self.enqueue_packet(packet, destination)
-
-    def send_ping(self, data: PingData, destination: int | None = None) -> None:
-        """Send ping data to a specific node or broadcast.
-
-        Args:
-            data: Ping data to send
-            destination: Optional destination node ID. If None, broadcast to all neighbors.
-
-        Raises:
-            ValueError: If the destination is invalid
-        """
-        self._validate_destination(destination)
-        packet = MeshPacket()
-        packet.ping.base_packet.timestamp = current_timestamp_us()
-        packet.ping.frequency = data.frequency
-        packet.ping.amplitude = data.amplitude
-        packet.ping.latitude = data.latitude
-        packet.ping.longitude = data.longitude
-        packet.ping.altitude = data.altitude
-        self.enqueue_packet(packet, destination)
-
-    def send_no_ping(self, destination: int | None = None) -> None:
-        """Send no-ping response to a specific node or broadcast.
-
-        Args:
-            destination: Optional destination node ID. If None, broadcast to all neighbors.
-
-        Raises:
-            ValueError: If the destination is invalid
-        """
-        self._validate_destination(destination)
-        packet = MeshPacket()
-        packet.no_ping.base_packet.timestamp = current_timestamp_us()
-        self.enqueue_packet(packet, destination)
+    # --------------------------------------------------------------------------
+    # Public methods: Send messages
+    # --------------------------------------------------------------------------
 
     def send_request_config(
         self,
-        data: RequestConfigData,
         destination: int | None = None,
+        *,
+        want_ack: bool = False,
     ) -> None:
-        """Send config request to a specific node or broadcast.
+        """Send a configuration request message.
 
         Args:
-            data: Request config data to send
-            destination: Optional destination node ID. If None, broadcast to all neighbors.
-
-        Raises:
-            ValueError: If the destination is invalid
+            destination: Target node ID, or None for broadcast
+            want_ack: Whether to request acknowledgment
         """
-        self._validate_destination(destination)
-        packet = MeshPacket()
-        packet.request_config.node_id = data.node_id
-        packet.request_config.base_packet.timestamp = current_timestamp_us()
-        self.enqueue_packet(packet, destination)
+        pkt = PbMeshPacket()
+        pkt.request_config.base_packet.node_id = (
+            self.mesh_interface.get_numeric_node_id() or 0
+        )
+        pkt.request_config.base_packet.timestamp = current_timestamp_us()
+        raw = pkt.SerializeToString()
+        self.mesh_interface.send_message(
+            raw,
+            destination=destination,
+            want_ack=want_ack,
+        )
 
-    def send_request_ping(
+    def send_config(
         self,
-        data: RequestPingData,
+        data: ConfigData,
         destination: int | None = None,
+        *,
+        want_ack: bool = False,
     ) -> None:
-        """Send ping request to a specific node or broadcast.
+        """Send a configuration message.
 
         Args:
-            data: Request ping data to send
-            destination: Optional destination node ID. If None, broadcast to all neighbors.
-
-        Raises:
-            ValueError: If the destination is invalid
+            data: Configuration data to send
+            destination: Target node ID, or None for broadcast
+            want_ack: Whether to request acknowledgment
         """
-        self._validate_destination(destination)
-        packet = MeshPacket()
-        packet.request_ping.node_id = data.node_id
-        packet.request_ping.base_packet.timestamp = current_timestamp_us()
-        self.enqueue_packet(packet, destination)
+        pkt = PbMeshPacket()
+        pkt.config.base_packet.node_id = self.mesh_interface.get_numeric_node_id() or 0
+        pkt.config.base_packet.timestamp = current_timestamp_us()
 
-    def send_error(self, data: ErrorData, destination: int | None = None) -> None:
-        """Send error data to a specific node or broadcast.
+        pkt.config.gain = data.gain
+        pkt.config.sampling_rate = data.sampling_rate
+        pkt.config.center_frequency = data.center_frequency
+        pkt.config.run_num = data.run_num
+        pkt.config.enable_test_data = data.enable_test_data
+        pkt.config.ping_width_ms = data.ping_width_ms
+        pkt.config.ping_min_snr = data.ping_min_snr
+        pkt.config.ping_max_len_mult = data.ping_max_len_mult
+        pkt.config.ping_min_len_mult = data.ping_min_len_mult
+        pkt.config.target_frequencies.extend(data.target_frequencies)
+
+        raw = pkt.SerializeToString()
+        self.mesh_interface.send_message(
+            raw,
+            destination=destination,
+            want_ack=want_ack,
+        )
+
+    def send_ping(
+        self,
+        data: PingData,
+        destination: int | None = None,
+        *,
+        want_ack: bool = False,
+    ) -> None:
+        """Send a ping message.
+
+        Args:
+            data: Ping data to send
+            destination: Target node ID, or None for broadcast
+            want_ack: Whether to request acknowledgment
+        """
+        pkt = PbMeshPacket()
+        pkt.ping.base_packet.node_id = self.mesh_interface.get_numeric_node_id() or 0
+        pkt.ping.base_packet.timestamp = current_timestamp_us()
+
+        pkt.ping.frequency = data.frequency
+        pkt.ping.amplitude = data.amplitude
+        pkt.ping.latitude = data.latitude
+        pkt.ping.longitude = data.longitude
+        pkt.ping.altitude = data.altitude
+
+        raw = pkt.SerializeToString()
+        self.mesh_interface.send_message(
+            raw,
+            destination=destination,
+            want_ack=want_ack,
+        )
+
+    def send_error(
+        self,
+        data: ErrorData,
+        destination: int | None = None,
+        *,
+        want_ack: bool = False,
+    ) -> None:
+        """Send an error message.
 
         Args:
             data: Error data to send
-            destination: Optional destination node ID. If None, broadcast to all neighbors.
-
-        Raises:
-            ValueError: If the destination is invalid
+            destination: Target node ID, or None for broadcast
+            want_ack: Whether to request acknowledgment
         """
-        self._validate_destination(destination)
-        packet = MeshPacket()
-        packet.error.base_packet.timestamp = current_timestamp_us()
-        packet.error.error_message = data.error_message
-        self.enqueue_packet(packet, destination)
+        pkt = PbMeshPacket()
+        pkt.error.base_packet.node_id = self.mesh_interface.get_numeric_node_id() or 0
+        pkt.error.base_packet.timestamp = current_timestamp_us()
+        pkt.error.error_message = data.error_message
 
-    def _extract_config(self, packet: MeshPacket.Config) -> ConfigData:
-        """Extract config data from a mesh packet.
+        raw = pkt.SerializeToString()
+        self.mesh_interface.send_message(
+            raw,
+            destination=destination,
+            want_ack=want_ack,
+        )
 
-        Args:
-            packet: Config packet to extract data from
+    # --------------------------------------------------------------------------
+    # GPS
+    # --------------------------------------------------------------------------
+    def get_node_position(self) -> PositionData | None:
+        """Return a PositionData if found, else None."""
+        pos_info = self.mesh_interface.get_node_position()
+        if not pos_info:
+            return None
+        return PositionData(
+            node_id=self.mesh_interface.get_numeric_node_id(),
+            latitude=pos_info.get("latitude", 0.0),
+            longitude=pos_info.get("longitude", 0.0),
+            altitude=pos_info.get("altitude", 0.0),
+            timestamp=pos_info.get("time"),
+        )
 
-        Returns:
-            Extracted ConfigData object
-        """
+    # --------------------------------------------------------------------------
+    # Internal: Inbound message parsing
+    # --------------------------------------------------------------------------
+
+    def _on_raw_packet(self, raw_data: bytes) -> None:
+        try:
+            pb = PbMeshPacket()
+            pb.ParseFromString(raw_data)
+
+            which = pb.WhichOneof("msg")
+            if which == "request_config":
+                data = self._extract_request_config(pb.request_config)
+                self._handle_request_config(data)
+            elif which == "config":
+                data = self._extract_config(pb.config)
+                self._handle_config(data)
+            elif which == "ping":
+                data = self._extract_ping(pb.ping)
+                self._handle_ping(data)
+            elif which == "error":
+                data = self._extract_error(pb.error)
+                self._handle_error(data)
+            else:
+                logger.debug("Received unknown message type: %s", which)
+        except Exception:
+            logger.exception("Failed to parse inbound data as MeshPacket.")
+
+    def _extract_request_config(self, pb: PbRequestConfigPacket) -> RequestConfigData:
+        return RequestConfigData(
+            node_id=pb.base_packet.node_id,
+            timestamp=pb.base_packet.timestamp,
+        )
+
+    def _extract_config(self, pb: PbConfigPacket) -> ConfigData:
         return ConfigData(
-            gain=packet.gain,
-            sampling_rate=packet.sampling_rate,
-            center_frequency=packet.center_frequency,
-            run_num=packet.run_num,
-            enable_test_data=packet.enable_test_data,
-            ping_width_ms=packet.ping_width_ms,
-            ping_min_snr=packet.ping_min_snr,
-            ping_max_len_mult=packet.ping_max_len_mult,
-            ping_min_len_mult=packet.ping_min_len_mult,
-            target_frequencies=list(packet.target_frequencies),
-            timestamp=packet.timestamp,
+            gain=pb.gain,
+            sampling_rate=pb.sampling_rate,
+            center_frequency=pb.center_frequency,
+            run_num=pb.run_num,
+            enable_test_data=pb.enable_test_data,
+            ping_width_ms=pb.ping_width_ms,
+            ping_min_snr=pb.ping_min_snr,
+            ping_max_len_mult=pb.ping_max_len_mult,
+            ping_min_len_mult=pb.ping_min_len_mult,
+            target_frequencies=list(pb.target_frequencies),
+            node_id=pb.base_packet.node_id,
+            timestamp=pb.base_packet.timestamp,
         )
 
-    def _extract_no_config(self, packet: MeshPacket.NoConfig) -> NoConfigData:
-        """Extract no-config data from a mesh packet.
-
-        Args:
-            packet: No-config packet to extract data from
-
-        Returns:
-            Extracted NoConfigData object
-        """
-        return NoConfigData(timestamp=packet.timestamp)
-
-    def _extract_ping(self, packet: MeshPacket.Ping) -> PingData:
-        """Extract ping data from a mesh packet.
-
-        Args:
-            packet: Ping packet to extract data from
-
-        Returns:
-            Extracted PingData object
-        """
+    def _extract_ping(self, pb: PbPingPacket) -> PingData:
         return PingData(
-            frequency=packet.frequency,
-            amplitude=packet.amplitude,
-            latitude=packet.latitude,
-            longitude=packet.longitude,
-            altitude=packet.altitude,
-            timestamp=packet.timestamp,
+            frequency=pb.frequency,
+            amplitude=pb.amplitude,
+            latitude=pb.latitude,
+            longitude=pb.longitude,
+            altitude=pb.altitude,
+            node_id=pb.base_packet.node_id,
+            timestamp=pb.base_packet.timestamp,
         )
 
-    def _extract_no_ping(self, packet: MeshPacket.NoPing) -> NoPingData:
-        """Extract no-ping data from a mesh packet.
-
-        Args:
-            packet: No-ping packet to extract data from
-
-        Returns:
-            Extracted NoPingData object
-        """
-        return NoPingData(timestamp=packet.timestamp)
-
-    def _extract_request_config(
-        self,
-        packet: MeshPacket.RequestConfig,
-    ) -> RequestConfigData:
-        """Extract request config data from a mesh packet.
-
-        Args:
-            packet: Request config packet to extract data from
-
-        Returns:
-            Extracted RequestConfigData object
-        """
-        return RequestConfigData(timestamp=packet.timestamp)
-
-    def _extract_request_ping(self, packet: MeshPacket.RequestPing) -> RequestPingData:
-        """Extract request ping data from a mesh packet.
-
-        Args:
-            packet: Request ping packet to extract data from
-
-        Returns:
-            Extracted RequestPingData object
-        """
-        return RequestPingData(timestamp=packet.timestamp)
-
-    def _extract_error(self, packet: MeshPacket.Error) -> ErrorData:
-        """Extract error data from a mesh packet.
-
-        Args:
-            packet: Error packet to extract data from
-
-        Returns:
-            Extracted ErrorData object
-        """
+    def _extract_error(self, pb: PbErrorPacket) -> ErrorData:
         return ErrorData(
-            error_message=packet.error_message,
-            timestamp=packet.timestamp,
+            error_message=pb.error_message,
+            node_id=pb.base_packet.node_id,
+            timestamp=pb.base_packet.timestamp,
         )
 
-    def _handle_config(self, data: ConfigData) -> None:
-        """Handle received config data by invoking registered handlers.
-
-        Args:
-            data: Received config data
-        """
-        self._invoke_handlers(self._config_handlers, data)
-
-    def _handle_no_config(self, data: NoConfigData) -> None:
-        """Handle received no-config data by invoking registered handlers.
-
-        Args:
-            data: Received no-config data
-        """
-        self._invoke_handlers(self._no_config_handlers, data)
-
-    def _handle_ping(self, data: PingData) -> None:
-        """Handle received ping data by invoking registered handlers.
-
-        Args:
-            data: Received ping data
-        """
-        self._invoke_handlers(self._ping_handlers, data)
-
-    def _handle_no_ping(self, data: NoPingData) -> None:
-        """Handle received no-ping data by invoking registered handlers.
-
-        Args:
-            data: Received no-ping data
-        """
-        self._invoke_handlers(self._no_ping_handlers, data)
-
-    def _handle_request_config(self, data: RequestConfigData) -> None:
-        """Handle received request config data by invoking registered handlers.
-
-        Args:
-            data: Received request config data
-        """
+    def _invoke_request_config(self, data: RequestConfigData) -> None:
         self._invoke_handlers(self._request_config_handlers, data)
 
-    def _handle_request_ping(self, data: RequestPingData) -> None:
-        """Handle received request ping data by invoking registered handlers.
+    def _invoke_config(self, data: ConfigData) -> None:
+        self._invoke_handlers(self._config_handlers, data)
 
-        Args:
-            data: Received request ping data
-        """
-        self._invoke_handlers(self._request_ping_handlers, data)
+    def _invoke_ping(self, data: PingData) -> None:
+        self._invoke_handlers(self._ping_handlers, data)
 
-    def _handle_error(self, data: ErrorData) -> None:
-        """Handle received error data by invoking registered handlers.
-
-        Args:
-            data: Received error data
-        """
+    def _invoke_error(self, data: ErrorData) -> None:
         self._invoke_handlers(self._error_handlers, data)
 
-    @staticmethod
     def _invoke_handlers(
-        handlers_list: list[tuple[Callable[[T], None], bool]],
+        self,
+        handlers: list[tuple[Callable[[T], None], bool]],
         data: T,
     ) -> None:
-        """Invoke all registered handlers for a given data type.
-
-        Args:
-            handlers_list: List of (handler, one_time) tuples
-            data: Data to pass to handlers
-        """
         to_remove = []
-        for i, (callback, one_time) in enumerate(handlers_list):
-            callback(data)
+        for i, (cb, one_time) in enumerate(handlers):
+            cb(data)
             if one_time:
                 to_remove.append(i)
         for i in reversed(to_remove):
-            handlers_list.pop(i)
+            handlers.pop(i)
+
+    def _unregister_handler(
+        self,
+        handler_list: list[tuple[Callable[[T], None], bool]],
+        handler_fn: Callable[[T], None],
+    ) -> bool:
+        for i, (cb, _once) in enumerate(handler_list):
+            if cb == handler_fn:
+                handler_list.pop(i)
+                return True
+        return False
+
+
+def current_timestamp_us() -> int:
+    """Return the current timestamp in microseconds."""
+    import time
+
+    return int(time.time() * 1_000_000)

@@ -9,23 +9,16 @@ logger = logging.getLogger(__name__)
 
 
 def ensure_proto_compiled() -> None:
-    """Compile the protobuf file."""
+    """Compile the protobuf file if needed."""
 
     def _handle_error(msg: str) -> None:
-        """Handle protoc compilation errors.
-
-        Args:
-            msg: Error message
-        """
         logger.error(msg)
-        logger.error("Make sure grpcio-tools is installed:\npoetry add grpcio-tools")
         raise RuntimeError(msg)
 
     proto_dir = Path(__file__).parent
     proto_file = proto_dir / "packets.proto"
 
     try:
-        # Always compile the proto file
         result = protoc.main(
             [
                 "grpc_tools.protoc",
@@ -34,10 +27,9 @@ def ensure_proto_compiled() -> None:
                 str(proto_file),
             ],
         )
-
         if result != 0:
             _handle_error(f"protoc returned non-zero status: {result}")
 
-        logger.info("Successfully compiled protobuf file")
-    except (OSError, ImportError, TypeError) as e:
-        _handle_error(f"Failed to compile protobuf: {e!s}")
+        logger.info("Protobuf successfully compiled.")
+    except (OSError, ImportError, RuntimeError) as e:
+        _handle_error(f"Failed to compile protobuf: {e}")

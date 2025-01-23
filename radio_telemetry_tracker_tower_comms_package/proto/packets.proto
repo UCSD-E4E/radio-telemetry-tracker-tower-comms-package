@@ -4,8 +4,15 @@ package radio_telemetry_tracker_tower_comms_package.proto;
 
 message BasePacket {
     uint64 timestamp = 1; // Microseconds since epoch
+    int32 node_id = 2;
 }
 
+// When a node starts, it sends a request for configuration data
+message RequestConfigPacket { 
+    BasePacket base_packet = 1;
+}
+
+// The GCS node will respond with the configuration data along with its node ID
 message ConfigPacket {
     BasePacket base_packet = 1;
     float gain = 2;
@@ -20,10 +27,7 @@ message ConfigPacket {
     repeated int32 target_frequencies = 11;
 }
 
-message NoConfigPacket {
-    BasePacket base_packet = 1;
-}
-
+// When a node detects a ping, it will send a ping packet to the GCS node
 message PingPacket {
     BasePacket base_packet = 1;
     int32 frequency = 2;
@@ -33,33 +37,18 @@ message PingPacket {
     float altitude = 6;
 }
 
-message NoPingPacket {
-    BasePacket base_packet = 1;
-}
-
-message RequestConfigPacket {
-    BasePacket base_packet = 1;
-    int32 node_id = 2;
-}
-
-message RequestPingPacket {
-    BasePacket base_packet = 1;
-    int32 node_id = 2;
-}
-
+// When a node encounters an error, it will send an error packet to the GCS node
 message ErrorPacket {
     BasePacket base_packet = 1;
     string error_message = 2;
 }
 
+// The top-level envelope
 message MeshPacket {
     oneof msg {
-        ConfigPacket config = 1;
-        NoConfigPacket no_config = 2;
+        RequestConfigPacket request_config = 1;
+        ConfigPacket config = 2;
         PingPacket ping = 3;
-        NoPingPacket no_ping = 4;
-        RequestConfigPacket request_config = 5;
-        RequestPingPacket request_ping = 6;
-        ErrorPacket error = 7;
+        ErrorPacket error = 4;
     }
 }
