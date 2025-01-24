@@ -9,17 +9,16 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal, TypeVar
 
-from radio_telemetry_tracker_tower_comms_package.data_types import (
+from radio_telemetry_tracker_tower_comms_package.data_models import (
     ConfigData,
     ErrorData,
     PingData,
     PositionData,
     RequestConfigData,
 )
-from radio_telemetry_tracker_tower_comms_package.interfaces import (
-    MeshInterface,
+from radio_telemetry_tracker_tower_comms_package.mesh_interface import MeshInterface
+from radio_telemetry_tracker_tower_comms_package.meshtastic_mesh import (
     MeshtasticMeshInterface,
-    SimulatedMeshInterface,
 )
 from radio_telemetry_tracker_tower_comms_package.proto import (
     ConfigPacket as PbConfigPacket,
@@ -35,6 +34,9 @@ from radio_telemetry_tracker_tower_comms_package.proto import (
 )
 from radio_telemetry_tracker_tower_comms_package.proto import (
     RequestConfigPacket as PbRequestConfigPacket,
+)
+from radio_telemetry_tracker_tower_comms_package.simulated_mesh import (
+    SimulatedMeshInterface,
 )
 
 T = TypeVar("T", RequestConfigData, ConfigData, PingData, ErrorData)

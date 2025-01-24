@@ -147,3 +147,11 @@ class SimulatedMeshInterface(MeshInterface):
             data, from_id = inbox.pop(0)
             if self._packet_callback:
                 self._packet_callback(data)
+
+    def configure_neighbors(self, neighbors: list[int]) -> None:
+        """Configure the list of neighboring nodes.
+
+        Args:
+            neighbors: List of numeric node IDs that are neighbors
+        """
+        self._nodes[self.numeric_id]["neighbors"] = neighbors
