@@ -389,16 +389,16 @@ class TowerComms:
             which = pb.WhichOneof("msg")
             if which == "request_config":
                 data = self._extract_request_config(pb.request_config)
-                self._handle_request_config(data)
+                self._invoke_request_config(data)
             elif which == "config":
                 data = self._extract_config(pb.config)
-                self._handle_config(data)
+                self._invoke_config(data)
             elif which == "ping":
                 data = self._extract_ping(pb.ping)
-                self._handle_ping(data)
+                self._invoke_ping(data)
             elif which == "error":
                 data = self._extract_error(pb.error)
-                self._handle_error(data)
+                self._invoke_error(data)
             else:
                 logger.debug("Received unknown message type: %s", which)
         except Exception:

@@ -22,8 +22,8 @@ message ConfigPacket {
     bool enable_test_data = 6;
     int32 ping_width_ms = 7;
     int32 ping_min_snr = 8;
-    int32 ping_max_len_mult = 9;
-    int32 ping_min_len_mult = 10;
+    float ping_max_len_mult = 9;
+    float ping_min_len_mult = 10;
     repeated int32 target_frequencies = 11;
 }
 

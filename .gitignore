@@ -176,3 +176,7 @@ cython_debug/
 
 # Poetry
 poetry.lock
+
+# Protobuf
+*_pb2.py
+
