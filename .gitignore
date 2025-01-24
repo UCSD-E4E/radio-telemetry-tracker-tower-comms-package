@@ -169,3 +169,14 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+
+# Ruff
+.ruff_cache/
+
+# Poetry
+poetry.lock
+
+# Protobuf
+*_pb2.py
+
