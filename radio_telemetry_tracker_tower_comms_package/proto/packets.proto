@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+package radio_telemetry_tracker_tower_comms_package.proto;
+
+message BasePacket {
+    uint64 timestamp = 1; // Microseconds since epoch
+    int32 node_id = 2;
+}
+
+// When a node starts, it sends a request for configuration data
+message RequestConfigPacket { 
+    BasePacket base_packet = 1;
+}
+
+// The GCS node will respond with the configuration data along with its node ID
+message ConfigPacket {
+    BasePacket base_packet = 1;
+    float gain = 2;
+    int32 sampling_rate = 3;
+    int32 center_frequency = 4;
+    int32 run_num = 5;
+    bool enable_test_data = 6;
+    int32 ping_width_ms = 7;
+    int32 ping_min_snr = 8;
+    float ping_max_len_mult = 9;
+    float ping_min_len_mult = 10;
+    repeated int32 target_frequencies = 11;
+}
+
+// When a node detects a ping, it will send a ping packet to the GCS node
+message PingPacket {
+    BasePacket base_packet = 1;
+    int32 frequency = 2;
+    float amplitude = 3;
+    double latitude = 4;
+    double longitude = 5;
+    float altitude = 6;
+}
+
+// When a node encounters an error, it will send an error packet to the GCS node
+message ErrorPacket {
+    BasePacket base_packet = 1;
+    string error_message = 2;
+}
+
+// The top-level envelope
+message MeshPacket {
+    oneof msg {
+        RequestConfigPacket request_config = 1;
+        ConfigPacket config = 2;
+        PingPacket ping = 3;
+        ErrorPacket error = 4;
+    }
+}
